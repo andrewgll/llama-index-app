@@ -50,12 +50,6 @@ openai.api_key = env.OPENAI_API_KEY
 
 app = FastAPI()
 
-# ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-# ssl_context.load_cert_chain(
-#     pathlib.Path(__file__).parent.joinpath("../configs/cert.pem"),
-#     pathlib.Path(__file__).parent.joinpath("../configs/key.pem"),
-# )
-
 static_path = Path(__file__).parent / "static"
 logging.info(static_path)
 templates = Jinja2Templates(directory=static_path)
@@ -68,29 +62,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-text_qa_template = (
-    "You are a helpful assistant to the company. You will receive contextual information, which you can find below.\n"
-    "---------------------\n"
-    "{context_str}\n"
-    "---------------------\n"
-    "With this information"
-    "answer the question: {query_str}\n"
-    "Try to use the context information as much as possible to answer the question. \n"
-)
-text_qa_template = Prompt(text_qa_template)
-
-refine_template_str = (
-    "Act as a customer service representative and answer the question succinctly: {query_str}\n"
-    "Combine with existing answer: {existing_answer}\n"
-    "------------\n"
-    "And refine with further context: {query_str}\n"
-    "------------\n"
-    "{context_msg}\n"
-    "------------\n"
-    "Be brief, polite, and respectful when responding to customer inquiries"
-)
-refine_template = Prompt(refine_template_str)
 
 openai_ef = embedding_functions.OpenAIEmbeddingFunction(
     api_key=env.OPENAI_API_KEY, model_name="text-embedding-ada-002"
@@ -231,32 +202,11 @@ async def message(request: Request, api_key: str = Depends(api_key_validation)):
             data = json.loads(decoded_body)
             query = data.get("query")
 
-            response_synthesizer = get_response_synthesizer(
-                service_context=service_context,
-                text_qa_template=text_qa_template,
-                refine_template=refine_template,
-                response_mode="refine",
-            )
-            system_prompt="You are a customer service representative for the company. Be brief, polite, and respectful when responding to customer inquiries. Try to answer briefly, clearly, and understandably"
-            chat_engine = index.as_chat_engine(
-                chat_mode="context",
-                verbose=True,
-                memory=memory,
-                response_synthesizer=response_synthesizer,
-                system_prompt=system_prompt
-            )
+            query_engine = index.as_query_engine()
 
-            messages = [
-                ChatMessage(
-                    role="system",
-                    content=system_prompt
-            ),
-            ]
-            text = chat_engine.chat(query, chat_history=messages)
-
-            response = text.response
-            logging.log(level=logging.INFO, msg=text)
-            response_content = {"text": response}
+            response = query_engine.query(query)
+            logging.log(level=logging.INFO, msg=response)
+            response_content = {"text": str(response)}
             return JSONResponse(content=response_content, status_code=200)
         else:
             raise HTTPException(status_code=400, detail="Please specify your message.")
