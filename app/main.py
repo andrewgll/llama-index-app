@@ -17,8 +17,6 @@ from pathlib import Path
 from fastapi.responses import Response as FASTAPIResponse
 
 from llama_index.core import Document, ServiceContext, VectorStoreIndex, PromptHelper, MockEmbedding
-from llama_index.core.query_engine import RetrieverQueryEngine
-from llama_index.core import Response
 from llama_index.core import StorageContext
 from llama_index.vector_stores.chroma import ChromaVectorStore
 from llama_index.llms.openai import OpenAI
@@ -26,11 +24,8 @@ from llama_index.core.llms import ChatMessage
 from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.core import get_response_synthesizer
 from llama_index.core import Prompt, set_global_service_context
-from llama_index.core.llms import MockLLM
-from llama_index.core.callbacks import CallbackManager, TokenCountingHandler
 from llama_index.core.memory import ChatMemoryBuffer
 
-import tiktoken
 import chromadb
 from chromadb.utils import embedding_functions
 from config.env import get_settings
