@@ -10,19 +10,7 @@ license = ""
 
 [tool.poetry.dependencies]
 python = "^3.11"
-llama_index = "0.7.14"
-setuptools = "^68.0.0"
-python-dotenv = "^1.0.0"
-uvicorn = "^0.22.0"
-mypy = "^1.4.1"
-debugpy = "^1.6.7"
-fastapi = "^0.99.0"
-types-pyyaml = "^6.0.12.10"
-openai = "^0.27.8"
-jinja2 = "^3.1.2"
-python-multipart = "^0.0.6"
-chromadb = "^0.4.3"
-tiktoken = "^0.4.0"
+llama-index = "^0.10.23"
 
 
 [tool.poetry.group.dev.dependencies]
