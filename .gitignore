@@ -1,3 +1,7 @@
 .venv/
 __pycache__/
 chroma_db/
+poetry.lock
+./.env
+data.txt
+app/.env
