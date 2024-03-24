@@ -3,7 +3,6 @@ import os
 import pathlib
 import sys
 
-from llama_index_client import SentenceSplitter
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import json
@@ -30,6 +29,7 @@ from llama_index.core import Prompt
 from llama_index.core.memory import ChatMemoryBuffer
 from llama_index.core.schema import MetadataMode
 from llama_index.core.ingestion import IngestionPipeline
+from llama_index.core.node_parser import SentenceSplitter
 
 import chromadb
 from chromadb.utils import embedding_functions
@@ -123,10 +123,10 @@ index = VectorStoreIndex(
     similarity_top_k=5,
 )
 
-def build_pipeline():
-    llm = OpenAI(model="gpt-3.5-turbo-1106", temperature=0.1)
+llm = OpenAI(model="gpt-3.5-turbo-1106", temperature=0.1)
 
-    transformations = [
+pipeline = IngestionPipeline(
+    transformations=[
         SentenceSplitter(chunk_size=1024, chunk_overlap=20),
         TitleExtractor(
             llm=llm, metadata_mode=MetadataMode.EMBED, num_workers=8
@@ -135,10 +135,9 @@ def build_pipeline():
             llm=llm, metadata_mode=MetadataMode.EMBED, num_workers=8
         ),
         OpenAIEmbedding(embed_batch_size=42),
-    ]
-    return IngestionPipeline(transformations=transformations, vector_store=vector_store)
-
-pipeline = build_pipeline()
+    ], 
+    vector_store=vector_store
+)
 
 def api_key_validation(request: Request):
     api_key = request.headers.get("Authorization")
@@ -193,12 +192,13 @@ def handle_root(document_id: str, api_key: str = Depends(api_key_validation)):
 @app.get("/add_documents")
 async def add_from_local():
     try:
-        with open('./app/data.txt', 'r', encoding='utf-8') as file:
+        with open('./app/data2.txt', 'r', encoding='utf-8') as file:
             for line in file:
                 text = line.strip()  
                 if text: 
                     doc = Document(text=text)
-                    index.insert(doc)
+                    await pipeline.arun(documents=[doc],show_progress=True)
+
         
         return FASTAPIResponse(status_code=200, content="Documents added successfully.")
     except HTTPException as e:
