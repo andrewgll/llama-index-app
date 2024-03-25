@@ -3,6 +3,7 @@ import os
 import pathlib
 import sys
 
+
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import json
 import debugpy
@@ -16,15 +17,19 @@ from fastapi.responses import JSONResponse
 from pathlib import Path
 from fastapi.responses import Response as FASTAPIResponse
 
-from llama_index.core import Document, ServiceContext, VectorStoreIndex, PromptHelper, MockEmbedding
+from llama_index.core import Document, ServiceContext, VectorStoreIndex, PromptHelper
 from llama_index.core import StorageContext
 from llama_index.vector_stores.chroma import ChromaVectorStore
 from llama_index.llms.openai import OpenAI
+from llama_index.core.extractors import TitleExtractor, SummaryExtractor
 from llama_index.core.llms import ChatMessage
 from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.core import get_response_synthesizer
-from llama_index.core import Prompt, set_global_service_context
+from llama_index.core import Prompt
 from llama_index.core.memory import ChatMemoryBuffer
+from llama_index.core.schema import MetadataMode
+from llama_index.core.ingestion import IngestionPipeline
+from llama_index.core.node_parser import SentenceSplitter
 
 import chromadb
 from chromadb.utils import embedding_functions
@@ -93,22 +98,23 @@ else:
 
 llm = OpenAI(temperature=0.2, model="gpt-3.5-turbo")
 
-embed_model = OpenAIEmbedding(embed_batch_size=42)
+chroma_collection = db2.get_or_create_collection(
+    "collection", embedding_function=openai_ef
+)
+vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
+
 
 prompt_helper = PromptHelper(
     context_window=4096, num_output=256, chunk_overlap_ratio=0.1, chunk_size_limit=None
 )
 
+
 service_context = ServiceContext.from_defaults(
-    llm=llm, embed_model=embed_model, prompt_helper=prompt_helper
+    llm=llm, prompt_helper=prompt_helper
 )
 
 
-chroma_collection = db2.get_or_create_collection(
-    "collection", embedding_function=openai_ef
-)
 
-vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
 storage_context = StorageContext.from_defaults(vector_store=vector_store)
 index = VectorStoreIndex(
     [],
@@ -117,6 +123,21 @@ index = VectorStoreIndex(
     similarity_top_k=5,
 )
 
+llm = OpenAI(model="gpt-3.5-turbo-1106", temperature=0.1)
+
+pipeline = IngestionPipeline(
+    transformations=[
+        SentenceSplitter(chunk_size=1024, chunk_overlap=20),
+        TitleExtractor(
+            llm=llm, metadata_mode=MetadataMode.EMBED, num_workers=8
+        ),
+        SummaryExtractor(
+            llm=llm, metadata_mode=MetadataMode.EMBED, num_workers=8
+        ),
+        OpenAIEmbedding(embed_batch_size=42),
+    ], 
+    vector_store=vector_store
+)
 
 def api_key_validation(request: Request):
     api_key = request.headers.get("Authorization")
@@ -168,9 +189,28 @@ def handle_root():
 def handle_root(document_id: str, api_key: str = Depends(api_key_validation)):
     return index.storage_context.docstore.get_document(document_id)
 
+@app.get("/add_documents")
+async def add_from_local():
+    try:
+        with open('./app/data2.txt', 'r', encoding='utf-8') as file:
+            for line in file:
+                text = line.strip()  
+                if text: 
+                    doc = Document(text=text)
+                    await pipeline.arun(documents=[doc],show_progress=True)
+
+        
+        return FASTAPIResponse(status_code=200, content="Documents added successfully.")
+    except HTTPException as e:
+        raise HTTPException(
+            status_code=e.status_code, detail=f"Something went wrong: {e.detail}"
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Something went wrong: {e}")
+
 
 @app.post("/documents")
-async def slack_events(request: Request):
+async def add_documents(request: Request):
     try:
         body = await request.body()
         decoded_body = body.decode()
@@ -178,7 +218,7 @@ async def slack_events(request: Request):
         if decoded_body:
             data = json.loads(decoded_body)
             doc = Document(text=data["query"])
-            index.insert(doc)
+            await pipeline.arun(documents=[doc],show_progress=True)
             return FASTAPIResponse(status_code=200)
     except HTTPException as e:
         raise HTTPException(
@@ -227,9 +267,9 @@ async def message(request: Request, api_key: str = Depends(api_key_validation)):
                 refine_template=refine_template,
                 response_mode="refine",
             )
-            system_prompt="You are a customer service representative for the company. Be brief, polite, and respectful when responding to customer inquiries. Try to answer briefly, clearly, and understandably"
+            system_prompt="Твоя роль допомагати учням дізнаватись інформацію про ліцей"
             chat_engine = index.as_chat_engine(
-                chat_mode="context",
+                chat_mode="best",
                 verbose=True,
                 memory=memory,
                 response_synthesizer=response_synthesizer,
