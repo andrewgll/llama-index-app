@@ -1,9 +1,7 @@
 .venv/
 __pycache__/
-chroma_db/
 poetry.lock
-./.env
 data.txt
-app/.env
 volumes
-model_bin/*
+model_bin
+.env
