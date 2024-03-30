@@ -218,8 +218,13 @@ async def handle_post_message(
                 [], service_context=service_context, storage_context=storage_context
             )
 
-            splitter = SentenceSplitter(chunk_size=256, chunk_overlap=0)
-
+            splitter = SemanticSplitterNodeParser(
+                        buffer_size=1,
+                        breakpoint_percentile_threshold=95,
+                        embed_model=service_context.embed_model,
+                        sentence_splitter=SentenceSplitter(chunk_size=256, chunk_overlap=0)
+                    )
+            
             retriever = embedded_index.as_retriever(
                 similarity_top_k=10,
             )
