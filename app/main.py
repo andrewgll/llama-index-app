@@ -17,7 +17,6 @@ from fastapi.responses import JSONResponse
 from pathlib import Path
 from fastapi.responses import Response as FASTAPIResponse
 
-from transformers import AutoModelForSequenceClassification, AutoTokenizer
 from pdfminer.high_level import extract_text
 from llama_index.core.postprocessor import SimilarityPostprocessor
 from llama_index.core import Document, ServiceContext, VectorStoreIndex, PromptHelper
@@ -31,9 +30,7 @@ from llama_index.core import Prompt
 from llama_index.core.schema import MetadataMode
 from llama_index.core.ingestion import IngestionPipeline
 from llama_index.core.node_parser import SentenceSplitter, SemanticSplitterNodeParser
-from llama_index.postprocessor.flag_embedding_reranker import (
-    FlagEmbeddingReranker,
-)
+
 from llama_index.core.postprocessor import SentenceEmbeddingOptimizer
 
 from app.config.env import get_settings
@@ -48,18 +45,6 @@ if os.getenv("ENVIRONMENT") == "DEBUG":
 
 logging.config.dictConfig(logging_config)
 env = get_settings()
-
-if not os.path.exists("/app/model_bin/BAAI/bge-reranker-large"):
-    model = AutoModelForSequenceClassification.from_pretrained(
-        "BAAI/bge-reranker-large"
-    )
-    tokenizer = AutoTokenizer.from_pretrained("BAAI/bge-reranker-large")
-    tokenizer.save_pretrained("/app/model_bin/BAAI/bge-reranker-large")
-    model.save_pretrained("/app/model_bin/BAAI/bge-reranker-large")
-
-rerank = FlagEmbeddingReranker(
-    model="/app/model_bin/BAAI/bge-reranker-large", top_n=5, use_fp16=True
-)
 
 openai.api_key = env.OPENAI_API_KEY
 
@@ -124,32 +109,7 @@ service_context = ServiceContext.from_defaults(
 similarity_postprocessor = SimilarityPostprocessor(similarity_cutoff=0.75)
 sentece_postprocessor = SentenceEmbeddingOptimizer(
     embed_model=service_context.embed_model,
-    percentile_cutoff=0.75,
-    threshold_cutoff=0.7,
-)
-
-TITLE_NODE_TEMPLATE = """\
-Context: {context_str}. Give a very short and comprehensive title that summarizes this text using 2 words. Title: """
-DEFAULT_TITLE_COMBINE_TEMPLATE = """\
-{context_str}. Based on the above candidate titles and content, \
-choose very short, maximum 2 words title for this document. Title: """
-pipeline = IngestionPipeline(
-    transformations=[
-        SemanticSplitterNodeParser(
-            buffer_size=1,
-            breakpoint_percentile_threshold=95,
-            embed_model=service_context.embed_model,
-        ),
-        TitleExtractor(
-            llm=llm,
-            nodes=7,
-            metadata_mode=MetadataMode.EMBED,
-            num_workers=8,
-            node_template=TITLE_NODE_TEMPLATE,
-        ),
-        OpenAIEmbedding(embed_batch_size=42),
-    ],
-    vector_store=vector_store,
+    threshold_cutoff=0.8,
 )
 
 
@@ -186,6 +146,11 @@ def handle_health():
     return "200"
 
 
+@app.delete("/documents")
+async def handle_delete_documents():
+    milvus_client.drop_collection("llamacollection")
+
+
 @app.post("/documents")
 async def handle_post_documents(request: Request, pdf_file: UploadFile = File(...)):
     try:
@@ -196,8 +161,32 @@ async def handle_post_documents(request: Request, pdf_file: UploadFile = File(..
         text = extract_text(pdf_file_object)
         logging.log(level=logging.INFO, msg=text)
         if text:
+            TITLE_NODE_TEMPLATE = """\
+            Context: {context_str}. Give a very short and comprehensive title that summarizes this text using 2 words. Title: """
+            DEFAULT_TITLE_COMBINE_TEMPLATE = """\
+            {context_str}. Based on the above candidate titles and content, \
+            choose very short, maximum 2 words title for this document. Title: """
+            pipeline = IngestionPipeline(
+                transformations=[
+                    SemanticSplitterNodeParser(
+                        buffer_size=1,
+                        breakpoint_percentile_threshold=95,
+                        embed_model=service_context.embed_model,
+                    ),
+                    TitleExtractor(
+                        llm=llm,
+                        nodes=7,
+                        metadata_mode=MetadataMode.EMBED,
+                        num_workers=8,
+                        node_template=TITLE_NODE_TEMPLATE,
+                        combine_template=DEFAULT_TITLE_COMBINE_TEMPLATE,
+                    ),
+                    OpenAIEmbedding(embed_batch_size=42),
+                ],
+                vector_store=vector_store,
+            )
             doc = Document(text=text)
-            pipeline.run(documents=[doc], show_progress=True, num_workers=8)
+            await pipeline.arun(documents=[doc], show_progress=True)
             return FASTAPIResponse(status_code=200)
     except HTTPException as e:
         raise HTTPException(
@@ -229,30 +218,27 @@ async def handle_post_message(
                 [], service_context=service_context, storage_context=storage_context
             )
 
+            splitter = SentenceSplitter(chunk_size=256, chunk_overlap=0)
+
             retriever = embedded_index.as_retriever(
                 similarity_top_k=10,
             )
-            splitter = SentenceSplitter(
-                chunk_size=1024,
-                chunk_overlap=20,
-                include_metadata=False
-            )
+
             nodes = await retriever.aretrieve(query)
 
             filtered_nodes_stage_1 = similarity_postprocessor.postprocess_nodes(nodes)
-
-            splitted_nodes = await splitter.acall(filtered_nodes_stage_1)
-
-            filtered_nodes_stage_2 = sentece_postprocessor.postprocess_nodes(
-                splitted_nodes
+            filtered_nodes_stage_2 = await splitter.acall(
+                [n_with_score.node for n_with_score in filtered_nodes_stage_1]
             )
-
-            filtered_nodes_stage_3 = rerank.postprocess_nodes(filtered_nodes_stage_2)
-
+            middle_index = VectorStoreIndex(
+                filtered_nodes_stage_2, embed_model=service_context.embed_model
+            )
+            filtered_nodes_stage_3 = await middle_index.as_retriever(
+                similarity_top_k=4, node_postprocessors=[sentece_postprocessor]
+            ).aretrieve(query)
             output_index = VectorStoreIndex(
-                filtered_nodes_stage_3,
-                service_context=service_context,
-                similarity_top_k=3,  # default value if not specified
+                [n_with_score.node for n_with_score in filtered_nodes_stage_3],
+                llm=service_context.llm,
                 response_synthesizer=response_synthesizer,
             )
 
@@ -264,9 +250,8 @@ async def handle_post_message(
 
             text = await query_engine.aquery(query)
 
-            response = text.response
             logging.log(level=logging.INFO, msg=text)
-            response_content = {"text": response}
+            response_content = {"text": text.response, "metadata": text.metadata}
             return JSONResponse(content=response_content, status_code=200)
         else:
             raise HTTPException(status_code=400, detail="Please specify your message.")

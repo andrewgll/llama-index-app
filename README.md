@@ -11,9 +11,9 @@ This is a bot for finding data in the local context of your documents. It works 
 * add your OpenAI token to the .env file
 * `poetry install`
 * `poetry shell` for the local environment
-* `docker-compose up`
+* `docker-compose up --build -d`
 ### For debugging
-* In VSCode just attach process, it already has implemented debugpy.
+* In VSCode just attach process, it already has implemented debugpy. Don't forget to change env of container in docker-compose.yml
 
 ## Usage
 

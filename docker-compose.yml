@@ -73,7 +73,7 @@ services:
       context: .
       dockerfile: Dockerfile
     environment:
-      - ENVIRONMENT=DEBUG
+      - ENVIRONMENT=DEV
     volumes:
       - ./:/app
       - ./model_bin:/app/model_bin
