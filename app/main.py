@@ -218,12 +218,7 @@ async def handle_post_message(
                 [], service_context=service_context, storage_context=storage_context
             )
 
-            splitter = SemanticSplitterNodeParser(
-                        buffer_size=1,
-                        breakpoint_percentile_threshold=95,
-                        embed_model=service_context.embed_model,
-                        sentence_splitter=SentenceSplitter(chunk_size=256, chunk_overlap=0)
-                    )
+            splitter = SentenceSplitter(chunk_size=256, chunk_overlap=0)
             
             retriever = embedded_index.as_retriever(
                 similarity_top_k=10,
@@ -231,7 +226,7 @@ async def handle_post_message(
 
             nodes = await retriever.aretrieve(query)
 
-            filtered_nodes_stage_1 = similarity_postprocessor.postprocess_nodes(nodes)
+            filtered_nodes_stage_1 = similarity_postprocessor.postprocess_nodes(nodes=nodes, query_str=query)
             filtered_nodes_stage_2 = await splitter.acall(
                 [n_with_score.node for n_with_score in filtered_nodes_stage_1]
             )
