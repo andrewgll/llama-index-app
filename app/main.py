@@ -1,42 +1,47 @@
+import io
 import logging
 import os
 import pathlib
-import sys
 
-
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import json
 import debugpy
 import openai
+from pymilvus import MilvusClient
 import yaml
 
-from fastapi import FastAPI, Request, HTTPException, Depends
+from pymilvus import Collection
+from fastapi import FastAPI, File, Request, HTTPException, Depends, UploadFile
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pathlib import Path
 from fastapi.responses import Response as FASTAPIResponse
 
+from pdfminer.high_level import extract_text
+from llama_index.core.postprocessor import SimilarityPostprocessor
 from llama_index.core import Document, ServiceContext, VectorStoreIndex, PromptHelper
 from llama_index.core import StorageContext
-from llama_index.vector_stores.chroma import ChromaVectorStore
+from llama_index.vector_stores.milvus import MilvusVectorStore
 from llama_index.llms.openai import OpenAI
-from llama_index.core.extractors import TitleExtractor, SummaryExtractor
-from llama_index.core.llms import ChatMessage
+from llama_index.core.extractors import TitleExtractor
 from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.core import get_response_synthesizer
 from llama_index.core import Prompt
-from llama_index.core.memory import ChatMemoryBuffer
 from llama_index.core.schema import MetadataMode
 from llama_index.core.ingestion import IngestionPipeline
-from llama_index.core.node_parser import SentenceSplitter
+from llama_index.core.node_parser import SentenceSplitter, SemanticSplitterNodeParser
 
-import chromadb
-from chromadb.utils import embedding_functions
-from config.env import get_settings
+from llama_index.core.postprocessor import SentenceEmbeddingOptimizer
+
+from app.config.env import get_settings
 
 with pathlib.Path(__file__).parent.joinpath("../configs/logging.yaml").open() as config:
     logging_config = yaml.load(config, Loader=yaml.FullLoader)
+
+if os.getenv("ENVIRONMENT") == "DEBUG":
+    logging.getLogger("app").setLevel("DEBUG")
+    debugpy.listen(("0.0.0.0", 5001))
+    debugpy.wait_for_client()
 
 logging.config.dictConfig(logging_config)
 env = get_settings()
@@ -44,15 +49,7 @@ env = get_settings()
 openai.api_key = env.OPENAI_API_KEY
 
 app = FastAPI()
-
-# ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-# ssl_context.load_cert_chain(
-#     pathlib.Path(__file__).parent.joinpath("../configs/cert.pem"),
-#     pathlib.Path(__file__).parent.joinpath("../configs/key.pem"),
-# )
-
 static_path = Path(__file__).parent / "static"
-logging.info(static_path)
 templates = Jinja2Templates(directory=static_path)
 
 app.add_middleware(
@@ -76,7 +73,7 @@ text_qa_template = (
 text_qa_template = Prompt(text_qa_template)
 
 refine_template_str = (
-    "Act as a customer service representative and answer the question succinctly: {query_str}\n"
+    "Act as a customer service answer the question succinctly: {query_str}\n"
     "Combine with existing answer: {existing_answer}\n"
     "------------\n"
     "And refine with further context: {query_str}\n"
@@ -87,57 +84,34 @@ refine_template_str = (
 )
 refine_template = Prompt(refine_template_str)
 
-openai_ef = embedding_functions.OpenAIEmbeddingFunction(
-    api_key=env.OPENAI_API_KEY, model_name="text-embedding-ada-002"
-)
+# IP address of docker bridge
+vector_store = MilvusVectorStore(uri="http://172.17.0.1:19530", dim=1536)
+# If specified db host url
+if env.MILVUSVECTORSTORE:
+    vector_store = MilvusVectorStore(uri=env.MILVUSVECTORSTORE, dim=1536)
 
-if env.CHROMADATABASE_HOST:
-    db2 = chromadb.HttpClient(host=env.CHROMADATABASE_HOST, port=8000)
-else:
-    db2 = chromadb.PersistentClient(path="./chroma_db")
+storage_context = StorageContext.from_defaults(vector_store=vector_store)
+
+milvus_client: MilvusClient = vector_store.client
 
 llm = OpenAI(temperature=0.2, model="gpt-3.5-turbo")
-
-chroma_collection = db2.get_or_create_collection(
-    "collection", embedding_function=openai_ef
-)
-vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
-
 
 prompt_helper = PromptHelper(
     context_window=4096, num_output=256, chunk_overlap_ratio=0.1, chunk_size_limit=None
 )
 
-
 service_context = ServiceContext.from_defaults(
-    llm=llm, prompt_helper=prompt_helper
+    llm=llm,
+    prompt_helper=prompt_helper,
+    embed_model=OpenAIEmbedding(embed_batch_size=42),
 )
 
-
-
-storage_context = StorageContext.from_defaults(vector_store=vector_store)
-index = VectorStoreIndex(
-    [],
-    storage_context=storage_context,
-    service_context=service_context,
-    similarity_top_k=5,
+similarity_postprocessor = SimilarityPostprocessor(similarity_cutoff=0.75)
+sentece_postprocessor = SentenceEmbeddingOptimizer(
+    embed_model=service_context.embed_model,
+    threshold_cutoff=0.8,
 )
 
-llm = OpenAI(model="gpt-3.5-turbo-1106", temperature=0.1)
-
-pipeline = IngestionPipeline(
-    transformations=[
-        SentenceSplitter(chunk_size=1024, chunk_overlap=20),
-        TitleExtractor(
-            llm=llm, metadata_mode=MetadataMode.EMBED, num_workers=8
-        ),
-        SummaryExtractor(
-            llm=llm, metadata_mode=MetadataMode.EMBED, num_workers=8
-        ),
-        OpenAIEmbedding(embed_batch_size=42),
-    ], 
-    vector_store=vector_store
-)
 
 def api_key_validation(request: Request):
     api_key = request.headers.get("Authorization")
@@ -150,75 +124,69 @@ def api_key_validation(request: Request):
         raise HTTPException(status_code=403, detail="Invalid API key")
 
 
-if os.getenv("ENVIRONMENT") == "development":
-    logging.getLogger("app").setLevel("DEBUG")
-    debugpy.listen(("0.0.0.0", 5000))
+@app.get("/documents", response_class=JSONResponse)
+def handle_get_documents(api_key: str = Depends(api_key_validation)):
+    collection = Collection("llamacollection")  # Get an existing collection.
+    data = {
+        "schema": collection.schema,
+        "description": collection.description,
+        "name": collection.name,
+        "is_empty": collection.is_empty,
+        "num_entities": collection.num_entities,
+        "primary_field": collection.primary_field,
+        "partitions": [partition.dict() for partition in collection.partitions],
+        "indexes": collection.indexes,
+    }
 
-
-def create_dict_from_arrays(ids, texts):
-    if len(ids) != len(texts):
-        raise ValueError("Both arrays must have the same length.")
-
-    result_dict = {ids[i]: texts[i] for i in range(len(ids))}
-    return result_dict
-
-
-@app.get("/documents")
-def handle_root(api_key: str = Depends(api_key_validation)):
-    result = create_dict_from_arrays(
-        chroma_collection.get()["ids"], chroma_collection.get()["documents"]
-    )
-    return result
-
-
-@app.delete("/documents/{document_id}")
-def handle_root(document_id: str, api_key: str = Depends(api_key_validation)):
-    try:
-        chroma_collection.delete(ids=[document_id])
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Something went wrong: {e}")
-    return FASTAPIResponse(status_code=200)
+    return data
 
 
 @app.get("/healthz")
-def handle_root():
+def handle_health():
     return "200"
 
 
-@app.get("/documents/{document_id}")
-def handle_root(document_id: str, api_key: str = Depends(api_key_validation)):
-    return index.storage_context.docstore.get_document(document_id)
-
-@app.get("/add_documents")
-async def add_from_local():
-    try:
-        with open('./app/data2.txt', 'r', encoding='utf-8') as file:
-            for line in file:
-                text = line.strip()  
-                if text: 
-                    doc = Document(text=text)
-                    await pipeline.arun(documents=[doc],show_progress=True)
-
-        
-        return FASTAPIResponse(status_code=200, content="Documents added successfully.")
-    except HTTPException as e:
-        raise HTTPException(
-            status_code=e.status_code, detail=f"Something went wrong: {e.detail}"
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Something went wrong: {e}")
+@app.delete("/documents")
+async def handle_delete_documents():
+    milvus_client.drop_collection("llamacollection")
 
 
 @app.post("/documents")
-async def add_documents(request: Request):
+async def handle_post_documents(request: Request, pdf_file: UploadFile = File(...)):
     try:
-        body = await request.body()
-        decoded_body = body.decode()
-        logging.log(level=logging.INFO, msg=decoded_body)
-        if decoded_body:
-            data = json.loads(decoded_body)
-            doc = Document(text=data["query"])
-            await pipeline.arun(documents=[doc],show_progress=True)
+        pdf_content = await pdf_file.read()
+
+        pdf_file_object = io.BytesIO(pdf_content)
+
+        text = extract_text(pdf_file_object)
+        logging.log(level=logging.INFO, msg=text)
+        if text:
+            TITLE_NODE_TEMPLATE = """\
+            Context: {context_str}. Give a very short and comprehensive title that summarizes this text using 2 words. Title: """
+            DEFAULT_TITLE_COMBINE_TEMPLATE = """\
+            {context_str}. Based on the above candidate titles and content, \
+            choose very short, maximum 2 words title for this document. Title: """
+            pipeline = IngestionPipeline(
+                transformations=[
+                    SemanticSplitterNodeParser(
+                        buffer_size=1,
+                        breakpoint_percentile_threshold=95,
+                        embed_model=service_context.embed_model,
+                    ),
+                    TitleExtractor(
+                        llm=llm,
+                        nodes=7,
+                        metadata_mode=MetadataMode.EMBED,
+                        num_workers=8,
+                        node_template=TITLE_NODE_TEMPLATE,
+                        combine_template=DEFAULT_TITLE_COMBINE_TEMPLATE,
+                    ),
+                    OpenAIEmbedding(embed_batch_size=42),
+                ],
+                vector_store=vector_store,
+            )
+            doc = Document(text=text)
+            await pipeline.arun(documents=[doc], show_progress=True)
             return FASTAPIResponse(status_code=200)
     except HTTPException as e:
         raise HTTPException(
@@ -226,33 +194,12 @@ async def add_documents(request: Request):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Something went wrong: {e}")
-
-
-@app.put("/documents/{document_id}")
-async def handle_root(request: Request, document_id: str):
-    try:
-        body = await request.body()
-        decoded_body = body.decode()
-        logging.log(level=logging.INFO, msg=decoded_body)
-        if decoded_body:
-            data = json.loads(decoded_body)
-            query = data.get("query")
-            logging.log(level=logging.INFO, msg=query)
-            chroma_collection.update(ids=document_id, documents=query)
-            return FASTAPIResponse(status_code=200)
-    except HTTPException as e:
-        raise HTTPException(
-            status_code=e.status_code, detail=f"Something went wrong: {e.detail}"
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Something went wrong: {e}")
-
-
-memory = ChatMemoryBuffer.from_defaults(token_limit=1500)
 
 
 @app.post("/message")
-async def message(request: Request, api_key: str = Depends(api_key_validation)):
+async def handle_post_message(
+    request: Request, api_key: str = Depends(api_key_validation)
+):
     try:
         body = await request.body()
         decoded_body = body.decode()
@@ -263,30 +210,48 @@ async def message(request: Request, api_key: str = Depends(api_key_validation)):
 
             response_synthesizer = get_response_synthesizer(
                 service_context=service_context,
-                text_qa_template=text_qa_template,
-                refine_template=refine_template,
-                response_mode="refine",
+                # text_qa_template=text_qa_template,
+                # refine_template=refine_template,
+                response_mode="compact",
             )
-            system_prompt="Твоя роль допомагати учням дізнаватись інформацію про ліцей"
-            chat_engine = index.as_chat_engine(
+            embedded_index = VectorStoreIndex(
+                [], service_context=service_context, storage_context=storage_context
+            )
+
+            splitter = SentenceSplitter(chunk_size=256, chunk_overlap=0)
+
+            retriever = embedded_index.as_retriever(
+                similarity_top_k=10,
+            )
+
+            nodes = await retriever.aretrieve(query)
+
+            filtered_nodes_stage_1 = similarity_postprocessor.postprocess_nodes(nodes)
+            filtered_nodes_stage_2 = await splitter.acall(
+                [n_with_score.node for n_with_score in filtered_nodes_stage_1]
+            )
+            middle_index = VectorStoreIndex(
+                filtered_nodes_stage_2, embed_model=service_context.embed_model
+            )
+            filtered_nodes_stage_3 = await middle_index.as_retriever(
+                similarity_top_k=4, node_postprocessors=[sentece_postprocessor]
+            ).aretrieve(query)
+            output_index = VectorStoreIndex(
+                [n_with_score.node for n_with_score in filtered_nodes_stage_3],
+                llm=service_context.llm,
+                response_synthesizer=response_synthesizer,
+            )
+
+            query_engine = output_index.as_query_engine(
                 chat_mode="best",
                 verbose=True,
-                memory=memory,
                 response_synthesizer=response_synthesizer,
-                system_prompt=system_prompt
             )
 
-            messages = [
-                ChatMessage(
-                    role="system",
-                    content=system_prompt
-            ),
-            ]
-            text = chat_engine.chat(query, chat_history=messages)
+            text = await query_engine.aquery(query)
 
-            response = text.response
             logging.log(level=logging.INFO, msg=text)
-            response_content = {"text": response}
+            response_content = {"text": text.response, "metadata": text.metadata}
             return JSONResponse(content=response_content, status_code=200)
         else:
             raise HTTPException(status_code=400, detail="Please specify your message.")
@@ -296,4 +261,3 @@ async def message(request: Request, api_key: str = Depends(api_key_validation)):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Something went wrong: {e}")
-

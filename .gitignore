@@ -5,3 +5,5 @@ poetry.lock
 ./.env
 data.txt
 app/.env
+volumes
+model_bin/*
