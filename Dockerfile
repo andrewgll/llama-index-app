@@ -31,8 +31,8 @@ COPY ./poetry.lock ./pyproject.toml ./
 RUN poetry install
 
 COPY ./pyproject.toml /app/
-COPY ./.env/ /app/app
 COPY ./app/ /app/app/
+COPY ./.env/ /app/app/
 COPY ./configs/ /app/configs/
 WORKDIR /app
 
