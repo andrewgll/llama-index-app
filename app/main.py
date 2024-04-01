@@ -30,7 +30,7 @@ from llama_index.core import Prompt
 from llama_index.core.schema import MetadataMode
 from llama_index.core.ingestion import IngestionPipeline
 from llama_index.core.node_parser import SentenceSplitter, SemanticSplitterNodeParser
-
+from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.core.postprocessor import SentenceEmbeddingOptimizer
 
 from app.config.env import get_settings
@@ -85,10 +85,10 @@ refine_template_str = (
 refine_template = Prompt(refine_template_str)
 
 # IP address of docker bridge
-vector_store = MilvusVectorStore(uri="http://172.17.0.1:19530", dim=1536)
+vector_store = MilvusVectorStore(uri="http://172.17.0.1:19530", dim=1024)
 # If specified db host url
 if env.MILVUSVECTORSTORE:
-    vector_store = MilvusVectorStore(uri=env.MILVUSVECTORSTORE, dim=1536)
+    vector_store = MilvusVectorStore(uri=env.MILVUSVECTORSTORE, dim=1024)
 
 storage_context = StorageContext.from_defaults(vector_store=vector_store)
 
@@ -103,10 +103,12 @@ prompt_helper = PromptHelper(
 service_context = ServiceContext.from_defaults(
     llm=llm,
     prompt_helper=prompt_helper,
-    embed_model=OpenAIEmbedding(embed_batch_size=42),
+    embed_model=HuggingFaceEmbedding(
+        model_name="BAAI/bge-m3", cache_folder="/app/model_bin/BAAI_bge-m3"
+    ),
 )
 
-similarity_postprocessor = SimilarityPostprocessor(similarity_cutoff=0.75)
+similarity_postprocessor = SimilarityPostprocessor(similarity_cutoff=0.6)
 sentece_postprocessor = SentenceEmbeddingOptimizer(
     embed_model=service_context.embed_model,
     threshold_cutoff=0.8,
@@ -126,7 +128,7 @@ def api_key_validation(request: Request):
 
 @app.get("/documents", response_class=JSONResponse)
 def handle_get_documents(api_key: str = Depends(api_key_validation)):
-    collection = Collection("llamacollection")  # Get an existing collection.
+    collection = milvus_client.describe_index("llamacollection")  # Get an existing collection.
     data = {
         "schema": collection.schema,
         "description": collection.description,
@@ -173,15 +175,15 @@ async def handle_post_documents(request: Request, pdf_file: UploadFile = File(..
                         breakpoint_percentile_threshold=95,
                         embed_model=service_context.embed_model,
                     ),
-                    TitleExtractor(
-                        llm=llm,
-                        nodes=7,
-                        metadata_mode=MetadataMode.EMBED,
-                        num_workers=8,
-                        node_template=TITLE_NODE_TEMPLATE,
-                        combine_template=DEFAULT_TITLE_COMBINE_TEMPLATE,
-                    ),
-                    OpenAIEmbedding(embed_batch_size=42),
+                    # TitleExtractor(
+                    #     llm=llm,
+                    #     nodes=7,
+                    #     metadata_mode=MetadataMode.EMBED,
+                    #     num_workers=8,
+                    #     node_template=TITLE_NODE_TEMPLATE,
+                    #     combine_template=DEFAULT_TITLE_COMBINE_TEMPLATE,
+                    # ),
+                    service_context.embed_model,
                 ],
                 vector_store=vector_store,
             )
@@ -219,14 +221,16 @@ async def handle_post_message(
             )
 
             splitter = SentenceSplitter(chunk_size=256, chunk_overlap=0)
-            
+
             retriever = embedded_index.as_retriever(
                 similarity_top_k=10,
             )
 
             nodes = await retriever.aretrieve(query)
 
-            filtered_nodes_stage_1 = similarity_postprocessor.postprocess_nodes(nodes=nodes, query_str=query)
+            filtered_nodes_stage_1 = similarity_postprocessor.postprocess_nodes(
+                nodes=nodes, query_str=query
+            )
             filtered_nodes_stage_2 = await splitter.acall(
                 [n_with_score.node for n_with_score in filtered_nodes_stage_1]
             )

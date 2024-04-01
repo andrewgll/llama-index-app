@@ -24,6 +24,7 @@ python-multipart = "^0.0.9"
 llama-index-llms-huggingface = "^0.1.4"
 flagembedding = {git = "https://github.com/FlagOpen/FlagEmbedding.git"}
 llama-index-postprocessor-flag-embedding-reranker = "^0.1.2"
+llama-index-embeddings-huggingface = "^0.2.0"
 
 
 [tool.poetry.group.dev.dependencies]
