@@ -14,7 +14,7 @@ This is a bot for finding data in the local context of your documents. It works 
 * `docker-compose up --build -d`
 ### For debugging
 * In VSCode just attach process, it already has implemented debugpy. Don't forget to change env of container in docker-compose.yml
-![Alt text](URL "https://media.licdn.com/dms/image/D4D2DAQE2W-x0bq7zMw/profile-treasury-image-shrink_8192_8192/0/1711795299634?e=1712588400&v=beta&t=nDS1PLvlM3J77Lj2Si4hPm8Ww81_q-E_JSM9D7sHpIY")
+![Alt text]("https://media.licdn.com/dms/image/D4D2DAQE2W-x0bq7zMw/profile-treasury-image-shrink_8192_8192/0/1711795299634?e=1712588400&v=beta&t=nDS1PLvlM3J77Lj2Si4hPm8Ww81_q-E_JSM9D7sHpIY")
 ## Usage
 
 This app is working on fastAPI, so you can connect it to any app you need. You also can add your own API-key for security of this API.
